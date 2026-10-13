@@ -1,0 +1,1 @@
+﻿flutter create --platforms=android --org vn.edu.huit --project-name capitalflow_mobile .

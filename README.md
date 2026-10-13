@@ -1,0 +1,158 @@
+# CapitalFlow
+
+CapitalFlow là hệ thống quản lý tài chính gồm FastAPI API, background worker,
+cổng người dùng Next.js và cổng quản trị React/Vite. Dữ liệu được lưu trên
+Microsoft SQL Server; OCR chạy qua Gemini trong hàng đợi nền.
+
+Xem [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) để tra cứu toàn bộ file
+first-party và mục đích của từng file.
+
+## Thành phần và cổng mặc định
+
+| Thành phần | URL | Vai trò |
+|---|---|---|
+| API | `http://localhost:8000` | REST API, `/docs`, `/health`, `/ready` |
+| User Web | `http://localhost:3010` | Tài khoản, giao dịch, ngân sách và OCR |
+| Admin Web | `http://localhost:5173` | Người dùng, danh mục, audit và vận hành |
+| Worker | Không mở HTTP | Email, OCR và purge người dùng |
+| Mobile | Ứng dụng Android (Flutter) | Cùng API/CSDL với web, nhận thông báo đẩy từ web |
+
+## Yêu cầu
+
+- Python 3.12 và Node.js 20.
+- Microsoft SQL Server với hostname/FQDN, TCP port và database rõ ràng.
+- Microsoft ODBC Driver 18 for SQL Server.
+- Chứng chỉ SQL Server có chuỗi CA được máy chạy API/worker tin cậy.
+- Docker Desktop nếu chạy bằng container.
+
+## Cấu hình backend
+
+```powershell
+cd capitalflow-api
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -r ..\capitalflow-database\requirements.txt
+Copy-Item .env.example .env
+```
+
+Dependency Alembic được khai báo trong `capitalflow-database/requirements.txt`,
+không nằm trong dependency production của FastAPI. Image API/worker vì vậy chỉ
+chứa thư viện runtime và không mang công cụ thay đổi schema.
+
+Thay mọi placeholder trong `.env`. `DATABASE_URL` production phải dùng ODBC 18,
+`Encrypt=yes` và `TrustServerCertificate=no`. Không commit `.env`, khóa Fernet,
+JWT secret, mật khẩu SMTP hoặc thông tin đăng nhập SQL Server.
+
+API và worker phải dùng cùng `DATABASE_URL`, `JOB_ENCRYPTION_KEY` và
+`UPLOAD_DIR`. `JOB_ENCRYPTION_KEY` phải là Fernet key hợp lệ và được sao lưu
+cùng dữ liệu hàng đợi.
+
+## Database migration và seed
+
+Schema SQL Server được quản lý trong project `capitalflow-database`, tách khỏi
+runtime FastAPI. Migration không tự chạy khi API hoặc worker khởi động.
+
+```powershell
+cd capitalflow-api
+.\.venv\Scripts\python.exe -m alembic -c ..\capitalflow-database\alembic.ini current
+.\.venv\Scripts\python.exe -m alembic -c ..\capitalflow-database\alembic.ini upgrade head
+```
+
+`capitalflow-database/tools/seed.py` luôn seed danh mục hệ thống. Script chỉ bootstrap system admin
+khi cả `CAPITALFLOW_BOOTSTRAP_ADMIN_EMAIL` và
+`CAPITALFLOW_BOOTSTRAP_ADMIN_PASSWORD` được cấp từ secret store hoặc phiên
+terminal. Không có tài khoản hoặc mật khẩu admin mặc định trong source code.
+
+```powershell
+.\.venv\Scripts\python.exe -B ..\capitalflow-database\tools\seed.py
+```
+
+## Chạy local
+
+Mở bốn terminal:
+
+```powershell
+# Backend API
+cd capitalflow-api
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+
+# Worker chạy nền (xử lý tất cả loại job khi phát triển local)
+cd capitalflow-api
+.\.venv\Scripts\python.exe -m app.modules.jobs.runner
+
+# User Web
+cd frontend/user-web
+npm ci
+npm run dev
+
+# Admin Web
+cd frontend/admin-web
+npm ci
+npm run dev
+```
+
+Worker là tiến trình bắt buộc cho email, OCR và hard-delete. Nếu worker dừng,
+API vẫn phục vụ các nghiệp vụ đồng bộ nhưng job sẽ giữ trạng thái chờ.
+
+## Docker
+
+Hai frontend được build từ Compose ở thư mục gốc:
+
+```powershell
+docker compose config --quiet
+docker compose build
+docker compose up -d
+```
+
+API và worker dùng Compose riêng để không tự ý tạo hoặc thay đổi SQL Server:
+
+```powershell
+cd capitalflow-api
+$env:CAPITALFLOW_ENV_FILE = '.env.docker'
+docker compose config --quiet
+docker compose build
+docker compose up -d
+```
+
+Tạo `.env.docker` từ `.env.docker.example`. Có thể dùng SQL Authentication đã
+được cấp sẵn hoặc Kerberos với ODBC 18. Compose không tạo SQL login, không bật
+mixed authentication và không hạ kiểm tra TLS.
+
+## Kiểm thử
+
+```powershell
+cd capitalflow-api
+.\.venv\Scripts\python.exe -m compileall -q app scripts tests
+.\.venv\Scripts\python.exe -m pytest -q
+
+cd ..\frontend\user-web
+npm run typecheck
+npm test -- --run
+npm run build
+
+cd ..\admin-web
+npm run lint
+npm run build
+```
+
+Sau khi build backend image, smoke-test production artifact:
+
+```powershell
+cd capitalflow-api
+.\.venv\Scripts\python.exe -m scripts.verify_docker
+```
+
+## Ứng dụng mobile và thông báo
+
+Ứng dụng Flutter nằm trong `capitalflow-mobile/` và dùng chung backend, cơ sở dữ liệu với hai cổng
+web. Backend có thêm module `app/modules/thongbao` (bảng `notifications`, REST
+`/api/v1/notifications` và WebSocket `/api/v1/notifications/ws`) để đẩy thông báo về điện thoại mỗi
+khi dữ liệu thay đổi trên web.
+
+Trước khi chạy bản backend này cần tạo bảng thông báo — chạy
+`capitalflow-database/sql/20261006_notifications.sql` trong SSMS hoặc `alembic upgrade head`.
+Để điện thoại thật gọi được API, chạy Uvicorn với `--host 0.0.0.0`.
+
+Hướng dẫn chi tiết từng bước: [HUONG_DAN_MOBILE.md](HUONG_DAN_MOBILE.md).
+Thiết kế module thông báo: [capitalflow-api/docs/features/notifications.md](capitalflow-api/docs/features/notifications.md).
